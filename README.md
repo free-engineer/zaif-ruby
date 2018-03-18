@@ -4,11 +4,14 @@ This repo is forked from [palon7/zaif-ruby](https://github.com/palon7/zaif-ruby)
 
 Zaif API wrapper for ruby.
 
+When Zaif API returns erros (502 Bad Gateway, Net::ReadTimeout, time wait restriction..), retry specified times.
+
+
 ## Installation
 
 Add this line to your application's Gemfile:
 
-    gem 'zaif4ruby', github: "techbureau/zaif-ruby"
+    gem 'zaif4ruby', github: "free-engineer/zaif-ruby"
 
 And then execute:
 
