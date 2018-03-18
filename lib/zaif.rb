@@ -22,6 +22,9 @@ module Zaif
             @zaif_trade_url = "https://api.zaif.jp/tapi"
             @zaif_futures_public_url = "https://api.zaif.jp/fapi/1/"
             @zaif_leverage_trade_url = "https://api.zaif.jp/tlapi"
+            @connect_retry = opt[:connect_retry] || 3
+            @open_timeout = opt[:open_timeout] || 5
+            @read_timeout = opt[:read_timeout] || 15
         end
 
         def set_api_key(api_key, api_secret)
@@ -313,24 +316,46 @@ module Zaif
             begin
                 https = Net::HTTP.new(uri.host, uri.port)
                 https.use_ssl = true
-                https.open_timeout = 5
-                https.read_timeout = 15
+                https.open_timeout = @open_timeout
+                https.read_timeout = @read_timeout
                 https.verify_mode = OpenSSL::SSL::VERIFY_PEER
                 https.verify_depth = 5
 
-                https.start {|w|
-                    response = w.get(uri.request_uri)
-                    case response
-                    when Net::HTTPSuccess
-                        json = JSON.parse(response.body)
-                        raise JSONException, response.body if json == nil
-                        raise APIErrorException, json["error"] if json.is_a?(Hash) && json.has_key?("error")
+                for i in 1..@connect_retry do
+                    begin
+                        https.start {|w|
+                        response = w.get(uri.request_uri)
+                        case response
+                        when Net::HTTPSuccess
+                            json = JSON.parse(response.body)
+                            raise JSONException, response.body if json == nil
+                            raise APIErrorException, json["error"] if json.is_a?(Hash) && json.has_key?("error")
+                            get_cool_down
+                            return json
+                        else
+                            raise ConnectionFailedException, "Failed to connect to zaif."
+                        end
+                        }
+                    rescue Net::HTTPFatalError => e
+                        if e.message.include?('Bad Gateway') then
+                            get_cool_down
+                        else
+                            raise
+                        end
+                    rescue Net::ReadTimeout => e
                         get_cool_down
-                        return json
-                    else
-                        raise ConnectionFailedException, "Failed to connect to zaif."
+                    rescue Zaif::APIErrorException => e
+                        if e.message.include?('time wait restriction') then
+                            sleep(15)
+                        elsif e.message.include?('trade temporarily unavailable') then
+                            sleep(15)
+                        else
+                            raise
+                        end
+                    rescue
+                        raise
                     end
-                }
+                end
             rescue
                 raise
             end
@@ -341,34 +366,59 @@ module Zaif
             check_key
             uri = URI.parse(address)
             data["method"] = method
-            data["nonce"] = get_nonce
             begin
                 req = Net::HTTP::Post.new(uri)
-                req.set_form_data(data)
                 req["Key"] = @api_key
-                req["Sign"] = OpenSSL::HMAC::hexdigest(OpenSSL::Digest.new('sha512'), @api_secret, req.body)
 
 
                 https = Net::HTTP.new(uri.host, uri.port)
                 https.use_ssl = true
-                https.open_timeout = 5
-                https.read_timeout = 15
+                https.open_timeout = @open_timeout
+                https.read_timeout = @read_timeout
                 https.verify_mode = OpenSSL::SSL::VERIFY_PEER
                 https.verify_depth = 5
 
-                https.start {|w|
-                    response = w.request(req)
-                    case response
-                    when Net::HTTPSuccess
-                        json = JSON.parse(response.body)
-                        raise JSONException, response.body if json == nil
-                        raise APIErrorException, json["error"] if json.is_a?(Hash) && json["success"] == 0
+                for i in 1..@connect_retry do
+                    begin
+                        https.start {|w|
+                        
+                            # nonce refresh
+                            data["nonce"] = get_nonce
+                            req.set_form_data(data)
+                            req["Sign"] = OpenSSL::HMAC::hexdigest(OpenSSL::Digest.new('sha512'), @api_secret, req.body)
+                        
+                            response = w.request(req)
+                        case response
+                        when Net::HTTPSuccess
+                            json = JSON.parse(response.body)
+                            raise JSONException, response.body if json == nil
+                            raise APIErrorException, json["error"] if json.is_a?(Hash) && json["success"] == 0
+                            get_cool_down
+                            return json["return"]
+                        else
+                            raise ConnectionFailedException, "Failed to connect to zaif: " + response.value
+                        end
+                        }
+                    rescue Net::HTTPFatalError => e
+                        if e.message.include?('Bad Gateway') then
+                            get_cool_down
+                        else
+                            raise
+                        end
+                    rescue Net::ReadTimeout => e
                         get_cool_down
-                        return json["return"]
-                    else
-                        raise ConnectionFailedException, "Failed to connect to zaif: " + response.value
+                    rescue Zaif::APIErrorException => e
+                        if e.message.include?('time wait restriction') then
+                            sleep(30)
+                        else
+                            raise
+                        end
+                    rescue
+                        raise
                     end
-                }
+                end
+                # Give Up!
+                raise ConnectionFailedException, @connect_retry.to_s + " times retry, but failed to connect to zaif... "                
             rescue
                 raise
             end
